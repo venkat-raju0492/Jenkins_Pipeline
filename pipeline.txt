@@ -1,0 +1,79 @@
+timeout(time: 240000, unit: 'SECONDS', activity: false) {
+	node("${env.NODE}") {
+	    properties([buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: "${env.ARTIFACT_BUILDS_TO_KEEP}", daysToKeepStr: '', numToKeepStr: "${env.NUM_BUILDS_TO_KEEP}")) , pipelineTriggers([pollSCM('''H/15 * * * *''')])])
+	    try{
+	        wrap([$class: 'MaskPasswordsBuildWrapper']) {
+
+                stage('Checkout') {
+	                checkout([$class: 'GitSCM', branches: [[name: "${CHECKOUT_BRANCH_NAME}"]],
+	                doGenerateSubmoduleConfigurations: false, extensions: [ [$class: 'CleanBeforeCheckout'],
+	                [$class: 'SubmoduleOption', disableSubmodules: false, parentCredentials: true, recursiveSubmodules: true,
+	                reference: '', trackingSubmodules: false]], submoduleCfg: [],
+	                userRemoteConfigs: [[credentialsId: '<credentialID for Github>',
+	                url: '<github URL>']]])
+	
+	                checkout poll:false, changelog:false, scm: [$class: 'GitSCM', branches: [[name: "${SCRIPT_BRANCH_NAME}"]],
+	                doGenerateSubmoduleConfigurations: false, extensions: [ [$class: 'RelativeTargetDirectory', relativeTargetDir: "build_script/"],
+	                [$class: 'SparseCheckoutPaths',  sparseCheckoutPaths:[[$class:'SparseCheckoutPath', path:"<DIR>/${JOB_NAME}/"]]]],
+	                submoduleCfg: [],
+	                userRemoteConfigs: [[credentialsId: '<credentialID for github>',
+	                url: '<github URL>']]]
+	                sh 'cp build_script/<DIR>/${JOB_NAME}/* . '
+	            }
+	            stage ('Build'){
+	                echo "Build"
+	                sh ' sh -xe build.sh'
+	            }
+	            stage('Upload-Artifacts') {
+	                
+	                script {
+	                    def server = Artifactory.server 'artifactory'
+	                    def uploadSpec = """{
+	                        "files": [
+	                            {
+	                                "pattern": "(*)/*.apk",
+	                                "target": "<setup targe>",
+                                    "flat": "false"
+	                            },
+	                            {
+	                               	"pattern": "(*)/mapping.txt",
+	                                "target": "<setup target>",
+	                                "flat": "false"
+	                            }
+	                        ]
+	                    }"""
+	                    server.upload(uploadSpec)
+	                    def buildInfo = server.upload(uploadSpec)
+	                    server.publishBuildInfo(buildInfo)
+	                    fingerprint "(*)/*.apk"
+	                }
+	            }
+	        }
+          	currentBuild.result = 'SUCCESS'
+	    }
+      
+	    catch (any) {
+	        currentBuild.result = 'FAILED'
+	    }
+
+	    finally {
+          
+	        stage('Post-Build') {
+	            if (currentBuild.result == 'SUCCESS'  ||currentBuild.result == 'STABLE' ) {
+	                build job: "${DOWNSTREAM_JOB}", parameters: [[$class: 'StringParameterValue', name: 'PARENT_JOB_NAME', value: "${JOB_NAME}"], [$class: 'StringParameterValue', name: 'PARENT_BUILD_ID', value: "${BUILD_ID}"]], propagate: false, wait: false
+	            }
+	        }
+          
+	        stage('Notification') {
+	            script{
+	                step([$class: 'StashNotifier', commitSha1: '', credentialsId: '5ce2d1dd-a913-4322-bb20-cde9c4060e87', stashServerBaseUrl: 'https://bitbucket.darkmatter.uae'])
+	                emailext (
+	                    body: '''${SCRIPT, template="email-html-dm.template"}''',
+	                    mimeType: 'text/html',
+	                    to: "${env.MAIL}",
+                        subject: "[JENKINS] ${env.JOB_NAME}")
+	            }
+	        }
+        }
+    }
+}
